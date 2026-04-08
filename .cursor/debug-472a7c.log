@@ -1,0 +1,1 @@
+{"sessionId": "472a7c", "runId": "post-fix", "hypothesisId": "H1", "location": "dsw_learner.py:__init__", "message": "device after explicit cuda + agent.to", "data": {"self_device": "cuda", "agent0_device": "cuda:0", "cuda_available": true, "cuda_device_count": 1}, "timestamp": 1775673841049}

@@ -25,11 +25,11 @@ class DSWLearner:
         self.agents = agents
         self.target_agents = copy.deepcopy(agents)
 
-        try:
-            self.device = next(self.agents[0].parameters()).device
-        except Exception:
-            self.device = th.device("cuda" if th.cuda.is_available() else "cpu")
-
+        self.device = th.device("cuda" if th.cuda.is_available() else "cpu")
+        for agent in self.agents:
+            agent.to(self.device)
+        for agent in self.target_agents:
+            agent.to(self.device)
         state_dim = getattr(args, "state_dim", 0)
         n_agents = len(self.agents)
 
