@@ -175,7 +175,7 @@ class BlockerGameEnv():
             #reward = -1
             reward = -1 + extra_reward
         else:
-            reward = 1 
+            reward = 2 
         
         avg_cost = sum(costs) / self.n_agents
         if done_mask == 1:
