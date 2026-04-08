@@ -2,7 +2,7 @@ from config.arguments import get_arg
 from envs import REGISTRY as env_REGISTRY
 from modules.agents import REGISTRY as agent_REGISTRY
 from learners import REGISTRY as learner_REGISTRY
-from databuffers.replaybuffer import ReplayBuffer
+from databuffers.replaybuffer import ReplayBuffer, EpisodeReplayBuffer
 from components.epsilon_schedules import DecayThenFlatSchedule
 from utils.utils import cleanup_dir
 
@@ -10,7 +10,6 @@ import torch as th
 import numpy as np
 import os
 import pickle
-from torch.distributions import Categorical
 
 if __name__ == '__main__':
     args = get_arg()
@@ -25,9 +24,9 @@ if __name__ == '__main__':
     
     global_reward_file = open("%s/global_reward.log" % (log_dir), "w", 1)
     loss_file = open("%s/loss.log" % (log_dir), "w", 1)
-    if args.rl_model == "cql":
+    if args.rl_model == "rnn":
         tderror_loss_file = open("%s/tderror_loss.log" % (log_dir), "w", 1)
-        gap_loss_file = open("%s/gap_loss.log" % (log_dir), "w", 1)
+        mono_loss_file = open("%s/mono_loss.log" % (log_dir), "w", 1)
     env_file = open("%s/env.pickle" % (log_dir), "wb", 1)
 
     # setup/load Environment
@@ -47,11 +46,14 @@ if __name__ == '__main__':
     
     # init env parameters
     env.set_logger(log_dir)
-    env.init_cql()
+    env.init_training()
     env.set_scheme(args.rl_model)
 
     # init replay buffer
-    buffer = ReplayBuffer(args.buffer_size)
+    if args.rl_model == "rnn":
+        buffer = EpisodeReplayBuffer(args.buffer_size)
+    else:
+        buffer = ReplayBuffer(args.buffer_size)
 
     
     # init epsilon decay schedule
@@ -63,7 +65,7 @@ if __name__ == '__main__':
         if args.rl_model == 'simple':
             agent = agent_REGISTRY['simple'](observation_spaces[i], action_spaces[i])
         else:
-            agent = agent_REGISTRY['cql'](observation_spaces[i], action_spaces[i], n_opponent_actions)
+            agent = agent_REGISTRY['rnn'](observation_spaces[i], action_spaces[i])
         
         agents.append(agent)
 
@@ -76,28 +78,44 @@ if __name__ == '__main__':
         buffer.clear()
         for epoch in range(args.training_epochs):
             state, obses = env.reset()
+            epoch_episode = []
+            rnn_hiddens = [None] * n_agent
             for env_t in range(args.max_env_t):
                 print("episode:{} epoch:{} step: {}".format(episode, epoch, env_t))
                 transition_data = {'states': obses, 'global_state': state}
-                # make action
+                # make action (rnn/DSW: joint argmax of Q_r + lambda_p Q_p - (rho/2) relu(-Q_p)^2)
                 with th.no_grad():
-                    actions = []
+                    dev = next(agents[0].parameters()).device
+                    qs_list = []
                     for i in range(n_agent):
-                        if args.rl_model == 'simple':
-                            qs = agents[i](th.tensor(obses[i], dtype=th.float32))
-                            if np.random.random() > schedule.eval(epoch):
-                                action = th.argmax(qs).item()
-                            else:
-                                action = np.random.randint(action_spaces[i])
+                        if args.rl_model == "rnn":
+                            o = th.tensor(obses[i], dtype=th.float32, device=dev).unsqueeze(0)
+                            _out = agents[i](o, rnn_hiddens[i])
+                            qs = _out[0].squeeze(0)
+                            rnn_hiddens[i] = _out[1].detach()
                         else:
-                            qvals = agents[i](th.tensor(obses[i], dtype=th.float32).unsqueeze(0))
-                            policys = agents[i].get_policy(th.tensor(obses[i], dtype=th.float32).unsqueeze(0)) 
-                            dist = Categorical(probs=policys)
-                            if np.random.random() > schedule.eval(epoch):
-                                action = dist.sample().item()
+                            _out = agents[i](th.tensor(obses[i], dtype=th.float32, device=dev))
+                            qs = _out[0] if isinstance(_out, tuple) else _out
+                        qs_list.append(qs)
+
+                    eps = schedule.eval(epoch)
+                    explore = np.random.random() <= eps
+                    actions = []
+                    if args.rl_model == "rnn":
+                        mac = th.stack(qs_list, dim=0).unsqueeze(0)
+                        st = th.tensor(state, dtype=th.float32, device=dev).unsqueeze(0)
+                        if explore:
+                            actions = [np.random.randint(0, action_spaces[i]) for i in range(n_agent)]
+                        else:
+                            ja = learner.joint_greedy_actions(mac, st)[0]
+                            actions = [int(ja[i].item()) for i in range(n_agent)]
+                    else:
+                        for i in range(n_agent):
+                            qs = qs_list[i]
+                            if explore:
+                                actions.append(np.random.randint(0, action_spaces[i]))
                             else:
-                                action = np.random.randint(action_spaces[i])
-                        actions.append(action)
+                                actions.append(th.argmax(qs).item())
         
                 state, obses, local_rewards, global_reward, done_mask = env.step(actions)
                 
@@ -112,18 +130,26 @@ if __name__ == '__main__':
                 transition_data["done_mask"] = done_mask
                 
                 print(global_reward, file=global_reward_file)
-                buffer.add(transition_data)
-                
-            if len(buffer) >= args.batch_size:
-                batch = buffer.sample_batch(args.batch_size)
-                if args.rl_model == "simple":
-                    loss = learner.train(batch)
-                    print(loss, file=loss_file)
+                if args.rl_model == "rnn":
+                    epoch_episode.append(transition_data)
                 else:
-                    loss, tderror_loss, gap_loss = learner.train(batch)
+                    buffer.add(transition_data)
+
+            if args.rl_model == "rnn" and epoch_episode:
+                buffer.add_episode(epoch_episode)
+                
+            if args.rl_model == "rnn":
+                # Sample batch_size subsequences with replacement across stored episodes.
+                if len(buffer) > 0:
+                    batch = buffer.sample_sequences(args.batch_size, args.seq_len, n_agent)
+                    loss, tderror_loss, mono_loss = learner.train(batch)
                     print(loss, file=loss_file)
                     print(tderror_loss, file=tderror_loss_file)
-                    print(gap_loss, file=gap_loss_file)
+                    print(mono_loss, file=mono_loss_file)
+                    print("training epoch:", epoch, "loss:", loss)
+            elif len(buffer) >= args.batch_size:
+                batch = buffer.sample_batch(args.batch_size)
+                loss = learner.train(batch)
+                print(loss, file=loss_file)
                 print("training epoch:", epoch, "loss:", loss)
         learner.save_models(model_log_dir)
-

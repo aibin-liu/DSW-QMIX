@@ -6,9 +6,9 @@ def get_arg():
 
     # Add config here
     # algorithm config
-    # if mixer == None, use IQL where simple_agent will be used, else use cql agent
+    # if mixer == None, use IQL with simple_agent; rnn uses RNN agent + DSW learner
     parser.add_argument('--rl-model', default='simple', 
-        help='Reinforcement learning model, select(simple|cql)')
+        help='Reinforcement learning model: simple | rnn')
     parser.add_argument('--mixer', default=None, 
         help='Mixer type, if None means only use local rewards. select(vdn|qmix|multi-qmix|None)')
     parser.add_argument('--lr', type=float, default=0.0005,
@@ -31,18 +31,21 @@ def get_arg():
         help='Finishing value for epsilon decay schedule')
     parser.add_argument('--epsilon-scheduler', default='exp', 
         help='Epsilon decay scheduler, select (exp|linear), default is exp')
-    parser.add_argument("--tau", type=float, default=0.999,
-        help='Update rate of delta for cql algorithm, refer to CMIX paper')
     parser.add_argument('--policy-disc', action='store_true', default=False,
         help='Use discrete policy in constrained RL algorithm')
     parser.add_argument('--weight-alpha', type=float, default=0.1,
         help='Weighted QMIX alpha parameter')
-    parser.add_argument('--loss-beta', type=float, default=1.,
-        help='Loss combination weight for cql learner') 
-
+    parser.add_argument('--cost-weight-mlp-hidden', type=int, default=64,
+        help='Hidden size for state-dependent cost-weight MLP in DSW learner')
+    parser.add_argument('--policy-rho', type=float, default=1.0,
+        help='DSW policy extraction: penalty weight rho on max(0,-Q_p)^2 in joint argmax objective')
+    parser.add_argument('--double-q', action='store_true', default=False,
+        help='Double DQN-style joint bootstrap (online max, target values)')
     # replay buffer config
     parser.add_argument('--buffer-size', type=int, default=1000,
-        help='Buffer size of replay buffer (default 1000)')
+        help='Capacity: transitions (simple) or max episodes (rnn)')
+    parser.add_argument('--seq-len', type=int, default=10,
+        help='Subsequence length for rnn episode replay (DRQN-style)')
 
     # running config
     parser.add_argument('--application', default='vn', 

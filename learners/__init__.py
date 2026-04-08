@@ -1,5 +1,5 @@
 REGISTRY = {}
-from .q_learner import QLearner 
-from .cql_learner import CQLLearner
+from .q_learner import QLearner
+from .dsw_learner import DSWLearner
 REGISTRY["simple"] = QLearner
-REGISTRY["cql"] = CQLLearner
+REGISTRY["rnn"] = DSWLearner

@@ -24,7 +24,6 @@ class VNEnv():
         
 
         self.discount_factor = self.args.gamma 
-        self.delta = 1 # CQL-mixer based algorithm, altually this is (1-\gamma)\delta in cql-paper
         self.utility_scale = None
         self.scheme = "basic"
         
@@ -44,7 +43,6 @@ class VNEnv():
             self.action_spaces += self.cluster_list[i].get_action_spaces()
         self.n_opponent_actions = 2
         
-        self.tau = args.tau
         self.global_step = 0
     
     def setup(self):
@@ -61,8 +59,8 @@ class VNEnv():
 
         return self.n_agents, self.state_space, self.observation_spaces, self.action_spaces, self.n_opponent_actions
         
-    def init_cql(self):
-        self.delta = 1
+    def init_training(self):
+        pass
 
     def set_logger(self, logdir):
         self.logdir = logdir
@@ -153,37 +151,26 @@ class VNEnv():
         if self.scheme == "basic":
             # for non-RL based algorithms
             return ave_rate, utility_sum, ave_latency_whole, peak_violation_sum
-        elif self.scheme == "cql":
-            # for CQL-(IQL|VDN|QMIX) algorithms
-            penalty_sum = peak_violation_sum
-            
-            obses = []
-            state = []
-            for obs in next_state_list:
-                obses.append(np.array(obs))
-                state += obs
-                
-            state = np.array(state)
-
-            global_reward = [utility_sum / self.utility_scale, (self.latency_avebound - ave_latency_whole) / self.latency_avebound] #normalized reward 
-
-            # update average avg global rewards
-            self.delta = self.tau * self.delta + (1 - self.tau) * global_reward[0] 
-            global_reward[0] -= self.delta
-            
-            for i in range(self.n_opponent_actions):
-                global_reward[i] -= penalty_sum
-            
-            local_rewards = [global_reward] * self.n_agents
         elif self.scheme == "simple":
-            # for simple qmix algorithm
             obses = []
             state = []
             for obs in next_state_list:
                 obses.append(np.array(obs))
                 state += obs
             state = np.array(state)
-            global_reward = utility_sum / self.utility_scale 
+            global_reward = utility_sum / self.utility_scale
+            local_rewards = self.get_per_rate()
+        elif self.scheme == "rnn":
+            obses = []
+            state = []
+            for obs in next_state_list:
+                obses.append(np.array(obs))
+                state += obs
+            state = np.array(state)
+            penalty = peak_violation_sum
+            r0 = utility_sum / self.utility_scale
+            r1 = (self.latency_avebound - ave_latency_whole) / self.latency_avebound
+            global_reward = [r0 - penalty, r1 - penalty]
             local_rewards = self.get_per_rate()
         
         done_mask = 1 

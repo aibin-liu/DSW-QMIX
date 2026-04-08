@@ -1,5 +1,5 @@
 '''
-Mixer for CMIX-M algorithm
+Mixer for multi-objective / constrained QMIX-style mixing (DSW path).
 '''
 import torch as th
 import torch.nn as nn
@@ -43,18 +43,15 @@ class MultiQMixer(nn.Module):
                                nn.Linear(self.embed_dim, 1 * self.n_opponent_actions))
     
     '''
-        Only for cql
-        agent_qs: [batch, n_opponent_actions, n_agents]
+        agent_qs: [batch, n_opponent_actions, n_agents] after reshape (opponent axis often 1 for DSW).
     '''
-    def forward(self, agent_qs, states, use_cql=False):
+    def forward(self, agent_qs, states):
         bs = agent_qs.size(0)
 
         states = states.view(-1, self.state_dim)
-        if not use_cql:
-            raise Exception("Only for CQL")
         agent_qs = agent_qs.view(-1, self.n_opponent_actions, 1, self.n_agents)
         # First layer
-        w1 = th.abs(self.hyper_w_1(states))
+        w1 = self.hyper_w_1(states)
         b1 = self.hyper_b_1(states)
         w1 = w1.view(-1, self.n_opponent_actions, self.n_agents, self.embed_dim)
         b1 = b1.view(-1, self.n_opponent_actions, 1, self.embed_dim)
@@ -63,7 +60,7 @@ class MultiQMixer(nn.Module):
         else:
             hidden = th.matmul(agent_qs, w1) + b1 
         # Second layer
-        w_final = th.abs(self.hyper_w_final(states))
+        w_final = self.hyper_w_final(states)
         w_final = w_final.view(-1, self.n_opponent_actions, self.embed_dim, 1)
         # State-dependent bias
         v = self.V(states).view(-1, self.n_opponent_actions, 1, 1)

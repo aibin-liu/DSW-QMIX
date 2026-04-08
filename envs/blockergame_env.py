@@ -8,11 +8,7 @@ class BlockerGameEnv():
         self.blockers = [[0, 2], [4, 6]]
         self._generate_grid()
         
-        # for cql reward
-        self.delta = -1
-        self.tau = args.tau
         self.avg_cost_ubound = 0.3
-        
         self.n_agents = 3
         self.observation_spaces = [self.grid_shape[0] * self.grid_shape[1] + 1] * self.n_agents
         self.state_space = self.grid_shape[0] * self.grid_shape[1] * 2
@@ -33,8 +29,9 @@ class BlockerGameEnv():
 
         return self.n_agents, self.state_space, self.observation_spaces, self.action_spaces, self.n_opponent_actions
 
-    def init_cql(self):
-        self.delta = -1
+    def init_training(self):
+        """Called once before training; hook for envs that reset constraint state."""
+        pass
 
     def set_logger(self, logdir):
         self.logdir = logdir
@@ -174,33 +171,28 @@ class BlockerGameEnv():
                     self.win_flag = True
                     print("Win !!!")
             self.move_blockers()
-        # cql
         if not self.win_flag:
             #reward = -1
             reward = -1 + extra_reward
         else:
-            reward = 0 
+            reward = 1 
         
         avg_cost = sum(costs) / self.n_agents
         if done_mask == 1:
             self.total_costs += avg_cost 
             self.returns += 1
             self.peak_violation_sum += peak_violation
-        
-        
         if self.scheme == "simple":
-            global_reward = reward 
+            global_reward = reward
         else:
-            global_reward = [reward - self.delta - peak_violation, self.avg_cost_ubound - avg_cost - peak_violation]
-            if done_mask == 1:
-                self.delta = self.tau * self.delta + (1 - self.tau) * reward
+            global_reward = [reward, min(0, self.avg_cost_ubound - avg_cost - peak_violation)]
         local_rewards = [global_reward] * self.n_agents
-        
+
         # update state observation
         self.global_step += 1
         
         if self.win_flag:
-            self.agents_pos = copy.deepcopy(self.agents_pos_init) # set final state tor start state, for CQL assumption
+            self.agents_pos = copy.deepcopy(self.agents_pos_init)  # reset layout after win for next episode
 
         grid_obs = self.get_grid_obs().flatten().tolist()
         cost_obs = self.cost_matrix.flatten().tolist()

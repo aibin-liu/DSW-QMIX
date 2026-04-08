@@ -42,20 +42,19 @@ class QMixer(nn.Module):
                                nn.Linear(self.embed_dim, 1))
     
     '''
-    for using cql:
-        the agent_qs has shape [batch, n_opponent_actions, n_agents]
-    for not using cql:
-        the agent_qs has shape [batch, n_agents]
+        agent_qs: [batch, n_agents] or [batch, k, n_agents] (e.g. extra axis for stacked Q).
     '''
-    def forward(self, agent_qs, states, use_cql=False):
+    def forward(self, agent_qs, states):
         bs = agent_qs.size(0)
         sz = agent_qs.size()
 
         states = states.view(-1, self.state_dim)
-        if not use_cql:
+        if len(sz) == 2:
             agent_qs = agent_qs.view(-1, 1, self.n_agents)
+        elif len(sz) != 3:
+            raise ValueError("agent_qs must be [batch, n_agents] or [batch, k, n_agents]")
         # First layer
-        w1 = th.abs(self.hyper_w_1(states))
+        w1 = self.hyper_w_1(states)
         b1 = self.hyper_b_1(states)
         w1 = w1.view(-1, self.n_agents, self.embed_dim)
         b1 = b1.view(-1, 1, self.embed_dim)
@@ -66,7 +65,7 @@ class QMixer(nn.Module):
             # so combine the actions' Q values locally will not cause bias  
             hidden = th.bmm(agent_qs, w1) + b1 
         # Second layer
-        w_final = th.abs(self.hyper_w_final(states))
+        w_final = self.hyper_w_final(states)
         w_final = w_final.view(-1, self.embed_dim, 1)
         # State-dependent bias
         v = self.V(states).view(-1, 1, 1)
@@ -75,7 +74,6 @@ class QMixer(nn.Module):
 
         # Reshape and return
         if len(sz) == 3:
-            # for recurrent state or cql state
             q_tot = y.view(bs, -1, 1)
         elif len(sz) == 2:
             q_tot = y.view(bs, 1)
