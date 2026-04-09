@@ -119,6 +119,30 @@ class BlockerGameEnv():
             return False
         
         return True
+
+    def _team_min_manhattan_to_goal(self, agent_positions, blockers):
+        """Min over agents of min L1 distance to any bottom-row cell not covered by blockers."""
+        row = self.grid_shape[0] - 1
+        allowed_ys = []
+        for y in range(self.grid_shape[1]):
+            blocked = False
+            for b in blockers:
+                if y >= b[0] and y <= b[1]:
+                    blocked = True
+                    break
+            if not blocked:
+                allowed_ys.append(y)
+        if not allowed_ys:
+            return 0.0
+        best = float("inf")
+        for p in agent_positions:
+            for y in allowed_ys:
+                d = abs(p[0] - row) + abs(p[1] - y)
+                best = min(best, d)
+        return best
+
+    def _potential_phi(self, agent_positions, blockers, scale):
+        return -scale * self._team_min_manhattan_to_goal(agent_positions, blockers)
     
     '''
         Blockers moving policy
@@ -137,6 +161,9 @@ class BlockerGameEnv():
 
     def step(self, actions):
         extra_reward = 0.
+        shaping_scale = float(getattr(self.args, "blocker_shaping_scale", 0.0))
+        shaping_f = 0.0
+        phi_s = 0.0
         
         costs = [0.] * self.n_agents
         peak_violation = 0
@@ -144,6 +171,10 @@ class BlockerGameEnv():
             done_mask = 0
         else:
             done_mask = 1
+            if shaping_scale > 0.0:
+                pos_before = copy.deepcopy(self.agents_pos)
+                blockers_before = copy.deepcopy(self.blockers)
+                phi_s = self._potential_phi(pos_before, blockers_before, shaping_scale)
             for i in range(self.n_agents):
                 next_pos = copy.copy(self.agents_pos[i])
                 if actions[i] == 1:
@@ -171,11 +202,17 @@ class BlockerGameEnv():
                     self.win_flag = True
                     print("Win !!!")
             self.move_blockers()
+            if shaping_scale > 0.0:
+                phi_sp = self._potential_phi(self.agents_pos, self.blockers, shaping_scale)
+                gamma = float(getattr(self.args, "gamma", 0.99))
+                shaping_f = gamma * phi_sp - phi_s
         if not self.win_flag:
             #reward = -1
-            reward = -1 + extra_reward
+            reward = -1.5 + extra_reward
         else:
-            reward = 2 
+            reward = 3
+        if shaping_scale > 0.0 and done_mask == 1:
+            reward = reward + shaping_f
         
         avg_cost = sum(costs) / self.n_agents
         if done_mask == 1:

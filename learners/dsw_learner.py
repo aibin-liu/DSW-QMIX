@@ -1,8 +1,10 @@
 import copy
 import itertools
+import json
 import math
+import time
 import numpy as np
-from typing import List
+from typing import List, Optional
 
 import torch as th
 import torch.nn as nn
@@ -38,20 +40,27 @@ class DSWLearner:
         self.target_mixer_rew = copy.deepcopy(self.mixer_rew).to(self.device)
         self.target_mixer_cost = copy.deepcopy(self.mixer_cost).to(self.device)
 
-        cw_hid = int(getattr(args, "cost_weight_mlp_hidden", 64))
-        self.cost_weight_net = nn.Sequential(
-            nn.Linear(state_dim, cw_hid),
-            nn.ReLU(),
-            nn.Linear(cw_hid, 1),
-        ).to(self.device)
-        self.target_cost_weight_net = copy.deepcopy(self.cost_weight_net).to(self.device)
+        sw = getattr(args, "static_cost_weight", None)
+        self._static_cost_weight: Optional[float] = float(sw) if sw is not None else None
+        if self._static_cost_weight is not None:
+            self.cost_weight_net = None
+            self.target_cost_weight_net = None
+            cw_params = []
+        else:
+            cw_hid = int(getattr(args, "cost_weight_mlp_hidden", 64))
+            self.cost_weight_net = nn.Sequential(
+                nn.Linear(state_dim, cw_hid),
+                nn.ReLU(),
+                nn.Linear(cw_hid, 1),
+            ).to(self.device)
+            self.target_cost_weight_net = copy.deepcopy(self.cost_weight_net).to(self.device)
+            cw_params = list(self.cost_weight_net.parameters())
 
         agent_params = []
         for agent in self.agents:
             agent_params.extend(list(agent.parameters()))
 
         mixer_params = list(self.mixer_rew.parameters()) + list(self.mixer_cost.parameters())
-        cw_params = list(self.cost_weight_net.parameters())
         self.params = agent_params + mixer_params + cw_params
 
         base_lr = float(getattr(args, "lr", 5e-4))
@@ -83,6 +92,9 @@ class DSWLearner:
         self.lambda_mono_warmup_steps: int = int(getattr(args, "lambda_mono_warmup_steps", 0))
         self.lambda_mono_anneal_steps: int = int(getattr(args, "lambda_mono_anneal_steps", 50000))
         self.lambda_mono_schedule: str = getattr(args, "lambda_mono_schedule", "linear")
+        if getattr(args, "disable_soft_mono", False):
+            self.lambda_mono_start = 0.0
+            self.lambda_mono_end = 0.0
         self.cur_lambda_mono: float = self.lambda_mono_start
 
         self.td_loss: str = str(getattr(args, "td_loss", "mse")).lower()
@@ -97,15 +109,32 @@ class DSWLearner:
         self._joint_indices_tensor = None
 
     @staticmethod
+    def _td_bootstrap_mask(done_mask: th.Tensor, reward_0: th.Tensor) -> th.Tensor:
+        """
+        Blockergame keeps done_mask=1 on the winning step so main.py still records the +2 transition.
+        The next state is already the reset layout, so TD must not add gamma * Q(s') there.
+        Primary reward > 1.5 indicates terminal win (e.g. +2 or +3 in blockergame).
+        """
+        r0 = reward_0[..., 0:1]
+        terminal_win = r0 > 1.5
+        return done_mask * (~terminal_win).float()
+
+    @staticmethod
     def _cost_w_from_logits(logits: th.Tensor) -> th.Tensor:
-        """Map unconstrained MLP output to w >= 0."""
-        return F.softplus(logits)
+        """Map unconstrained MLP output to strictly positive cost weights (softplus + floor)."""
+        return F.softplus(logits).clamp(min=1e-6)
 
     def _cost_w(self, global_state_flat: th.Tensor) -> th.Tensor:
-        """(N, state_dim) -> (N, 1), values in (0, inf) (softplus; numerically >= 0)."""
+        """(N, state_dim) -> (N, 1), values > 0."""
+        if self._static_cost_weight is not None:
+            N = global_state_flat.shape[0]
+            return global_state_flat.new_full((N, 1), self._static_cost_weight)
         return self._cost_w_from_logits(self.cost_weight_net(global_state_flat))
 
     def _target_cost_w(self, global_state_flat: th.Tensor) -> th.Tensor:
+        if self._static_cost_weight is not None:
+            N = global_state_flat.shape[0]
+            return global_state_flat.new_full((N, 1), self._static_cost_weight)
         return self._cost_w_from_logits(self.target_cost_weight_net(global_state_flat))
 
     def _lambda_mono_at(self, step: int) -> float:
@@ -202,6 +231,13 @@ class DSWLearner:
                 tqc = q_cost_t[ar, best_j].view(N, 1)
         return tqw, tqc
 
+    def _maybe_update_targets(self) -> None:
+        """Hard targets: sync every ``target_update_interval`` steps. Soft targets: Polyak step every step."""
+        if self.use_soft_target:
+            self._update_targets()
+        elif self.train_step % self.target_update_interval == 0:
+            self._update_targets()
+
     def joint_greedy_actions(self, mac_out: th.Tensor, global_state: th.Tensor) -> th.Tensor:
         """
         Joint argmax of Q_r + lambda_p(s) Q_p - (rho/2) relu(-Q_p)^2 (training-time policy).
@@ -265,11 +301,17 @@ class DSWLearner:
             reward_0 = r
             reward_1 = th.zeros_like(reward_0)
 
+        # #region agent log
+        _dbg_t0 = time.perf_counter()
+        # #endregion
         mac_out = self._rnn_mac_out(states, self.agents)
         n_actions = mac_out.shape[-1]
         with th.no_grad():
             mac_out_next_on = self._rnn_mac_out(next_states, self.agents)
             target_mac_out = self._rnn_mac_out(next_states, self.target_agents)
+        # #region agent log
+        _dbg_t1 = time.perf_counter()
+        # #endregion
 
         actions_exp = actions.unsqueeze(-1)
         chosen_action_qvals_agents = th.gather(mac_out, dim=3, index=actions_exp).squeeze(3)
@@ -283,19 +325,25 @@ class DSWLearner:
         target_q_rew, target_q_cost = self._td_bootstrap_targets(
             mac_next_on, mac_next_tgt, ngs, n_agents, n_actions
         )
+        # #region agent log
+        _dbg_t2 = time.perf_counter()
+        n_joint = int(n_actions**n_agents)
+        # #endregion
         target_q_rew = target_q_rew.view(B, T, 1)
         target_q_cost = target_q_cost.view(B, T, 1)
 
         q_tot_rew = self.mixer_rew(q_in, gs).view(B, T, 1)
         q_tot_cost = self.mixer_cost(q_in, gs).view(B, T, 1)
 
-        gamma = getattr(self.args, "gamma", 0.99)
-        targets_rew = reward_0 + gamma * done_mask * target_q_rew
-        targets_cost = reward_1 + gamma * done_mask * target_q_cost
+        gamma = getattr(self.args, "gamma", 0.96)
+        bootstrap = self._td_bootstrap_mask(done_mask, reward_0)
+        targets_rew = reward_0 + gamma * bootstrap * target_q_rew
+        targets_cost = reward_1 + gamma * bootstrap * target_q_cost
         targets_rew = targets_rew.detach()
         targets_cost = targets_cost.detach()
         td_error_rew = q_tot_rew - targets_rew
-        td_error_cost = q_tot_cost - targets_cost
+        w_td = self._cost_w(gs).view(B, T, 1)
+        td_error_cost = w_td * q_tot_cost - targets_cost
 
         mask_sum = mask.sum().clamp(min=1.0)
         if self.td_loss == "huber":
@@ -316,6 +364,9 @@ class DSWLearner:
         mono_loss_val = 0.0
         cur_lambda = self._lambda_mono_at(self.train_step)
         self.cur_lambda_mono = cur_lambda
+        # #region agent log
+        _dbg_t3 = time.perf_counter()
+        # #endregion
 
         if cur_lambda > 0.0:
             q_base = chosen_action_qvals_agents.detach() if self.mono_detach_q else chosen_action_qvals_agents
@@ -368,13 +419,83 @@ class DSWLearner:
             with th.no_grad():
                 mono_loss_val = mono_loss.item()
 
+        # #region agent log
+        _dbg_t4 = time.perf_counter()
+        # #endregion
         self.optimiser.zero_grad()
         loss.backward()
-        th.nn.utils.clip_grad_norm_(self.params, self.grad_clip)
+        grad_norm = th.nn.utils.clip_grad_norm_(self.params, self.grad_clip)
         self.optimiser.step()
+        # #region agent log
+        _dbg_t5 = time.perf_counter()
+        if self.train_step <= 5 or self.train_step % 200 == 0:
+            _pl = {
+                "sessionId": "5fa299",
+                "timestamp": int(time.time() * 1000),
+                "hypothesisId": "H_joint_H_rnn_H_mono",
+                "location": "dsw_learner.py:_train_sequence",
+                "message": "dsw_train_step_timing",
+                "data": {
+                    "train_step": int(self.train_step),
+                    "B": int(B),
+                    "T": int(T),
+                    "N_flat": int(batch_size),
+                    "n_agents": int(n_agents),
+                    "n_actions": int(n_actions),
+                    "n_joint": int(n_joint),
+                    "nj_times_N": int(n_joint * batch_size),
+                    "sec_rnn_three_mac": float(_dbg_t1 - _dbg_t0),
+                    "sec_td_bootstrap": float(_dbg_t2 - _dbg_t1),
+                    "sec_td_mixers_to_mono_start": float(_dbg_t3 - _dbg_t2),
+                    "sec_mono_block": float(_dbg_t4 - _dbg_t3),
+                    "sec_backward_optim": float(_dbg_t5 - _dbg_t4),
+                    "cur_lambda_mono": float(cur_lambda),
+                },
+                "runId": "perf-debug",
+            }
+            with open(
+                "/home/kai/Documents/bachelor_dissertation/DSW-QMIX/.cursor/debug-5fa299.log",
+                "a",
+                encoding="utf-8",
+            ) as _df:
+                _df.write(json.dumps(_pl) + "\n")
+        # #endregion
 
-        if self.train_step % self.target_update_interval == 0:
-            self._update_targets()
+        self._maybe_update_targets()
+
+        # #region agent log
+        if self.train_step % 1000 == 0:
+            msum = mask.sum().clamp(min=1.0)
+            mean_r0 = float((mask * reward_0).sum() / msum)
+            max_r0 = float((mask * reward_0).max()) if mask.any() else 0.0
+            td_item = float(td_loss.item())
+            scale_mono = float(cur_lambda * mono_loss_val) if cur_lambda > 0.0 else 0.0
+            payload = {
+                "sessionId": "472a7c",
+                "timestamp": int(time.time() * 1000),
+                "hypothesisId": "H1-H4",
+                "location": "dsw_learner.py:_train_sequence",
+                "message": "train_step_stats",
+                "data": {
+                    "train_step": int(self.train_step),
+                    "cur_lambda_mono": float(cur_lambda),
+                    "td_loss": td_item,
+                    "mono_loss_unweighted": float(mono_loss_val),
+                    "lambda_times_mono": scale_mono,
+                    "td_vs_lambda_mono_ratio": (td_item / scale_mono) if scale_mono > 1e-12 else None,
+                    "mean_r0_masked": mean_r0,
+                    "max_r0_masked": max_r0,
+                    "grad_norm_clipped": float(grad_norm.item()),
+                },
+                "runId": "pre-fix-debug",
+            }
+            with open(
+                "/home/kai/Documents/bachelor_dissertation/DSW-QMIX/.cursor/debug-472a7c.log",
+                "a",
+                encoding="utf-8",
+            ) as _df:
+                _df.write(json.dumps(payload) + "\n")
+        # #endregion
 
         return loss.item(), td_loss.item(), mono_loss_val
 
@@ -437,12 +558,14 @@ class DSWLearner:
         q_tot_cost = self.mixer_cost(q_in, global_state).view(batch_size, 1)
 
         gamma = getattr(self.args, "gamma", 0.99)
-        targets_rew = reward_0 + gamma * done_mask * target_q_rew
-        targets_cost = reward_1 + gamma * done_mask * target_q_cost
+        bootstrap = self._td_bootstrap_mask(done_mask, reward_0)
+        targets_rew = reward_0 + gamma * bootstrap * target_q_rew
+        targets_cost = reward_1 + gamma * bootstrap * target_q_cost
         targets_rew = targets_rew.detach()
         targets_cost = targets_cost.detach()
         td_error_rew = q_tot_rew - targets_rew
-        td_error_cost = q_tot_cost - targets_cost
+        w_td = self._cost_w(global_state)
+        td_error_cost = w_td * q_tot_cost - targets_cost
 
         if self.td_loss == "huber":
             delta = reward_0.new_tensor(self.huber_delta)
@@ -509,8 +632,7 @@ class DSWLearner:
         th.nn.utils.clip_grad_norm_(self.params, self.grad_clip)
         self.optimiser.step()
 
-        if self.train_step % self.target_update_interval == 0:
-            self._update_targets()
+        self._maybe_update_targets()
 
         return loss.item(), td_loss.item(), mono_loss_val
 
@@ -520,13 +642,15 @@ class DSWLearner:
                 self._polyak_update_(online, target, self.soft_target_tau)
             self._polyak_update_(self.mixer_rew, self.target_mixer_rew, self.soft_target_tau)
             self._polyak_update_(self.mixer_cost, self.target_mixer_cost, self.soft_target_tau)
-            self._polyak_update_(self.cost_weight_net, self.target_cost_weight_net, self.soft_target_tau)
+            if self._static_cost_weight is None:
+                self._polyak_update_(self.cost_weight_net, self.target_cost_weight_net, self.soft_target_tau)
         else:
             for online, target in zip(self.agents, self.target_agents):
                 target.load_state_dict(online.state_dict())
             self.target_mixer_rew.load_state_dict(self.mixer_rew.state_dict())
             self.target_mixer_cost.load_state_dict(self.mixer_cost.state_dict())
-            self.target_cost_weight_net.load_state_dict(self.cost_weight_net.state_dict())
+            if self._static_cost_weight is None:
+                self.target_cost_weight_net.load_state_dict(self.cost_weight_net.state_dict())
 
     def cuda(self):
         for agent in self.agents:
@@ -537,15 +661,20 @@ class DSWLearner:
         self.target_mixer_rew.cuda()
         self.mixer_cost.cuda()
         self.target_mixer_cost.cuda()
-        self.cost_weight_net.cuda()
-        self.target_cost_weight_net.cuda()
+        if self._static_cost_weight is None:
+            self.cost_weight_net.cuda()
+            self.target_cost_weight_net.cuda()
 
     def save_models(self, path):
         for i, agent in enumerate(self.agents):
             th.save(agent.state_dict(), f"{path}/agent_{i}.th")
         th.save(self.mixer_rew.state_dict(), f"{path}/mixer_rew.th")
         th.save(self.mixer_cost.state_dict(), f"{path}/mixer_cost.th")
-        th.save(self.cost_weight_net.state_dict(), f"{path}/cost_weight_net.th")
+        if self._static_cost_weight is not None:
+            with open(f"{path}/static_cost_weight.txt", "w") as f:
+                f.write(str(self._static_cost_weight))
+        else:
+            th.save(self.cost_weight_net.state_dict(), f"{path}/cost_weight_net.th")
         th.save(self.optimiser.state_dict(), f"{path}/opt.th")
 
     def load_models(self, path):
@@ -558,7 +687,8 @@ class DSWLearner:
         self.mixer_cost.load_state_dict(th.load(f"{path}/mixer_cost.th", map_location=lambda storage, loc: storage))
         self.target_mixer_cost.load_state_dict(self.mixer_cost.state_dict())
 
-        self.cost_weight_net.load_state_dict(th.load(f"{path}/cost_weight_net.th", map_location=lambda storage, loc: storage))
-        self.target_cost_weight_net.load_state_dict(self.cost_weight_net.state_dict())
+        if self._static_cost_weight is None:
+            self.cost_weight_net.load_state_dict(th.load(f"{path}/cost_weight_net.th", map_location=lambda storage, loc: storage))
+            self.target_cost_weight_net.load_state_dict(self.cost_weight_net.state_dict())
 
         self.optimiser.load_state_dict(th.load(f"{path}/opt.th", map_location=lambda storage, loc: storage))

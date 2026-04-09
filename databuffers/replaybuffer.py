@@ -51,6 +51,7 @@ class EpisodeReplayBuffer:
     """
     Stores complete episodes (each a list of transition dicts). Samples fixed-length
     subsequences for DRQN / recurrent QMIX-style training (i.i.d. over chunks).
+    FIFO eviction when at capacity.
     """
 
     def __init__(self, max_episodes: int, random_seed: int = 8):
