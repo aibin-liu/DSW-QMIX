@@ -35,18 +35,19 @@ class QLearner:
         self.target_agents = copy.deepcopy(self.agents)
 
     def train(self, batch):
+        dev = next(self.agents[0].parameters()).device
         # Get the relevant quantities
-        local_rewards = th.tensor([d['local_rewards'] for d in batch], dtype=th.float32)
-        global_reward = th.tensor([d['global_reward'] for d in batch], dtype=th.float32).view(-1, 1)
-        done_mask = th.tensor([d['done_mask'] for d in batch], dtype=th.float32).view(-1, 1) 
-        actions = th.tensor([d['actions'] for d in batch]).view(-1, self.n_agents, 1) 
-        global_state = th.tensor([d['global_state'] for d in batch], dtype=th.float32)
-        global_state_new = th.tensor([d['global_state_new'] for d in batch], dtype=th.float32)
+        local_rewards = th.tensor([d['local_rewards'] for d in batch], dtype=th.float32, device=dev)
+        global_reward = th.tensor([d['global_reward'] for d in batch], dtype=th.float32, device=dev).view(-1, 1)
+        done_mask = th.tensor([d['done_mask'] for d in batch], dtype=th.float32, device=dev).view(-1, 1)
+        actions = th.tensor([d['actions'] for d in batch], dtype=th.long, device=dev).view(-1, self.n_agents, 1)
+        global_state = th.tensor([d['global_state'] for d in batch], dtype=th.float32, device=dev)
+        global_state_new = th.tensor([d['global_state_new'] for d in batch], dtype=th.float32, device=dev)
         states = []
         states_new = []
         for i in range(self.n_agents):
-            state = th.tensor([d['states'][i] for d in batch], dtype=th.float32)
-            state_new = th.tensor([d['states_new'][i] for d in batch], dtype=th.float32)
+            state = th.tensor([d['states'][i] for d in batch], dtype=th.float32, device=dev)
+            state_new = th.tensor([d['states_new'][i] for d in batch], dtype=th.float32, device=dev)
             states.append(state)
             states_new.append(state_new)
 

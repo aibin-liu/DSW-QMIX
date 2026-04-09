@@ -55,6 +55,8 @@ class MultiQMixer(nn.Module):
         b1 = self.hyper_b_1(states)
         w1 = w1.view(-1, self.n_opponent_actions, self.n_agents, self.embed_dim)
         b1 = b1.view(-1, self.n_opponent_actions, 1, self.embed_dim)
+        if getattr(self.args, "hard_mixer_mono", False):
+            w1 = w1.abs()
         if self.args.policy_disc:
             hidden = F.elu(th.matmul(agent_qs, w1) + b1)
         else:
@@ -62,6 +64,8 @@ class MultiQMixer(nn.Module):
         # Second layer
         w_final = self.hyper_w_final(states)
         w_final = w_final.view(-1, self.n_opponent_actions, self.embed_dim, 1)
+        if getattr(self.args, "hard_mixer_mono", False):
+            w_final = w_final.abs()
         # State-dependent bias
         v = self.V(states).view(-1, self.n_opponent_actions, 1, 1)
         # Compute final output
