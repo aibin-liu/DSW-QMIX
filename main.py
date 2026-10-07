@@ -138,9 +138,6 @@ if __name__ == '__main__':
             state, obses = env.reset()
             epoch_episode = []
             rnn_hiddens = [None] * n_agent
-            # #region agent log
-            _perf_env_t0 = time.perf_counter()
-            # #endregion
             for env_t in range(args.max_env_t):
                 print("episode:{} epoch:{} step: {}".format(episode, epoch, env_t))
                 transition_data = {'states': obses, 'global_state': state}
@@ -198,98 +195,18 @@ if __name__ == '__main__':
 
             if args.rl_model == "rnn" and epoch_episode:
                 buffer.add_episode(epoch_episode)
-            # #region agent log
-            _perf_env_t1 = time.perf_counter()
-            # #endregion
             if args.rl_model == "rnn":
                 # Sample batch_size subsequences with replacement across stored episodes.
                 if len(buffer) > 0:
                     batch = buffer.sample_sequences(args.batch_size, args.seq_len, n_agent)
-                    # #region agent log
-                    _perf_train_t0 = time.perf_counter()
-                    # #endregion
                     loss, tderror_loss, mono_loss = learner.train(batch)
-                    # #region agent log
-                    _perf_train_t1 = time.perf_counter()
-                    if epoch < 3:
-                        _pl = {
-                            "sessionId": "5fa299",
-                            "timestamp": int(time.time() * 1000),
-                            "hypothesisId": "H_env",
-                            "location": "main.py:rnn_epoch",
-                            "message": "env_vs_train_wall_s",
-                            "data": {
-                                "epoch": int(epoch),
-                                "sec_env_loop": float(_perf_env_t1 - _perf_env_t0),
-                                "sec_train_only": float(_perf_train_t1 - _perf_train_t0),
-                                "rl_model": "rnn",
-                            },
-                            "runId": "perf-debug",
-                        }
-                        with open(
-                            "/home/kai/Documents/bachelor_dissertation/DSW-QMIX/.cursor/debug-5fa299.log",
-                            "a",
-                            encoding="utf-8",
-                        ) as _df:
-                            _df.write(json.dumps(_pl) + "\n")
-                    # #endregion
                     print(loss, file=loss_file)
                     print(tderror_loss, file=tderror_loss_file)
                     print(mono_loss, file=mono_loss_file)
                     print("training epoch:", epoch, "loss:", loss)
-                    # #region agent log
-                    if epoch % 1000 == 0:
-                        _eps = float(schedule.eval(epoch))
-                        _lm = getattr(learner, "cur_lambda_mono", None)
-                        _pl = {
-                            "sessionId": "472a7c",
-                            "timestamp": int(time.time() * 1000),
-                            "hypothesisId": "H5",
-                            "location": "main.py:training_loop",
-                            "message": "epsilon_schedule",
-                            "data": {
-                                "epoch": int(epoch),
-                                "epsilon": _eps,
-                                "cur_lambda_mono": float(_lm) if _lm is not None else None,
-                            },
-                            "runId": "pre-fix-debug",
-                        }
-                        with open(
-                            "/home/kai/Documents/bachelor_dissertation/DSW-QMIX/.cursor/debug-472a7c.log",
-                            "a",
-                            encoding="utf-8",
-                        ) as _df:
-                            _df.write(json.dumps(_pl) + "\n")
-                    # #endregion
             elif len(buffer) >= args.batch_size:
                 batch = buffer.sample_batch(args.batch_size)
-                # #region agent log
-                _perf_bt0 = time.perf_counter()
-                # #endregion
                 loss = learner.train(batch)
-                # #region agent log
-                if epoch < 3 and args.rl_model in FLAT_MARL_MODELS:
-                    _pl = {
-                        "sessionId": "5fa299",
-                        "timestamp": int(time.time() * 1000),
-                        "hypothesisId": "H_baseline",
-                        "location": "main.py:flat_epoch",
-                        "message": "env_vs_train_wall_s",
-                        "data": {
-                            "epoch": int(epoch),
-                            "sec_env_loop": float(_perf_env_t1 - _perf_env_t0),
-                            "sec_train_only": float(time.perf_counter() - _perf_bt0),
-                            "rl_model": str(args.rl_model),
-                        },
-                        "runId": "perf-debug",
-                    }
-                    with open(
-                        "/home/kai/Documents/bachelor_dissertation/DSW-QMIX/.cursor/debug-5fa299.log",
-                        "a",
-                        encoding="utf-8",
-                    ) as _df:
-                        _df.write(json.dumps(_pl) + "\n")
-                # #endregion
                 print(loss, file=loss_file)
                 print("training epoch:", epoch, "loss:", loss)
         learner.save_models(model_log_dir)

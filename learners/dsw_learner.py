@@ -1,8 +1,6 @@
 import copy
 import itertools
-import json
 import math
-import time
 import numpy as np
 from typing import List, Optional
 
@@ -301,17 +299,11 @@ class DSWLearner:
             reward_0 = r
             reward_1 = th.zeros_like(reward_0)
 
-        # #region agent log
-        _dbg_t0 = time.perf_counter()
-        # #endregion
         mac_out = self._rnn_mac_out(states, self.agents)
         n_actions = mac_out.shape[-1]
         with th.no_grad():
             mac_out_next_on = self._rnn_mac_out(next_states, self.agents)
             target_mac_out = self._rnn_mac_out(next_states, self.target_agents)
-        # #region agent log
-        _dbg_t1 = time.perf_counter()
-        # #endregion
 
         actions_exp = actions.unsqueeze(-1)
         chosen_action_qvals_agents = th.gather(mac_out, dim=3, index=actions_exp).squeeze(3)
@@ -325,10 +317,6 @@ class DSWLearner:
         target_q_rew, target_q_cost = self._td_bootstrap_targets(
             mac_next_on, mac_next_tgt, ngs, n_agents, n_actions
         )
-        # #region agent log
-        _dbg_t2 = time.perf_counter()
-        n_joint = int(n_actions**n_agents)
-        # #endregion
         target_q_rew = target_q_rew.view(B, T, 1)
         target_q_cost = target_q_cost.view(B, T, 1)
 
@@ -364,9 +352,6 @@ class DSWLearner:
         mono_loss_val = 0.0
         cur_lambda = self._lambda_mono_at(self.train_step)
         self.cur_lambda_mono = cur_lambda
-        # #region agent log
-        _dbg_t3 = time.perf_counter()
-        # #endregion
 
         if cur_lambda > 0.0:
             q_base = chosen_action_qvals_agents.detach() if self.mono_detach_q else chosen_action_qvals_agents
@@ -419,83 +404,12 @@ class DSWLearner:
             with th.no_grad():
                 mono_loss_val = mono_loss.item()
 
-        # #region agent log
-        _dbg_t4 = time.perf_counter()
-        # #endregion
         self.optimiser.zero_grad()
         loss.backward()
-        grad_norm = th.nn.utils.clip_grad_norm_(self.params, self.grad_clip)
+        th.nn.utils.clip_grad_norm_(self.params, self.grad_clip)
         self.optimiser.step()
-        # #region agent log
-        _dbg_t5 = time.perf_counter()
-        if self.train_step <= 5 or self.train_step % 200 == 0:
-            _pl = {
-                "sessionId": "5fa299",
-                "timestamp": int(time.time() * 1000),
-                "hypothesisId": "H_joint_H_rnn_H_mono",
-                "location": "dsw_learner.py:_train_sequence",
-                "message": "dsw_train_step_timing",
-                "data": {
-                    "train_step": int(self.train_step),
-                    "B": int(B),
-                    "T": int(T),
-                    "N_flat": int(batch_size),
-                    "n_agents": int(n_agents),
-                    "n_actions": int(n_actions),
-                    "n_joint": int(n_joint),
-                    "nj_times_N": int(n_joint * batch_size),
-                    "sec_rnn_three_mac": float(_dbg_t1 - _dbg_t0),
-                    "sec_td_bootstrap": float(_dbg_t2 - _dbg_t1),
-                    "sec_td_mixers_to_mono_start": float(_dbg_t3 - _dbg_t2),
-                    "sec_mono_block": float(_dbg_t4 - _dbg_t3),
-                    "sec_backward_optim": float(_dbg_t5 - _dbg_t4),
-                    "cur_lambda_mono": float(cur_lambda),
-                },
-                "runId": "perf-debug",
-            }
-            with open(
-                "/home/kai/Documents/bachelor_dissertation/DSW-QMIX/.cursor/debug-5fa299.log",
-                "a",
-                encoding="utf-8",
-            ) as _df:
-                _df.write(json.dumps(_pl) + "\n")
-        # #endregion
 
         self._maybe_update_targets()
-
-        # #region agent log
-        if self.train_step % 1000 == 0:
-            msum = mask.sum().clamp(min=1.0)
-            mean_r0 = float((mask * reward_0).sum() / msum)
-            max_r0 = float((mask * reward_0).max()) if mask.any() else 0.0
-            td_item = float(td_loss.item())
-            scale_mono = float(cur_lambda * mono_loss_val) if cur_lambda > 0.0 else 0.0
-            payload = {
-                "sessionId": "472a7c",
-                "timestamp": int(time.time() * 1000),
-                "hypothesisId": "H1-H4",
-                "location": "dsw_learner.py:_train_sequence",
-                "message": "train_step_stats",
-                "data": {
-                    "train_step": int(self.train_step),
-                    "cur_lambda_mono": float(cur_lambda),
-                    "td_loss": td_item,
-                    "mono_loss_unweighted": float(mono_loss_val),
-                    "lambda_times_mono": scale_mono,
-                    "td_vs_lambda_mono_ratio": (td_item / scale_mono) if scale_mono > 1e-12 else None,
-                    "mean_r0_masked": mean_r0,
-                    "max_r0_masked": max_r0,
-                    "grad_norm_clipped": float(grad_norm.item()),
-                },
-                "runId": "pre-fix-debug",
-            }
-            with open(
-                "/home/kai/Documents/bachelor_dissertation/DSW-QMIX/.cursor/debug-472a7c.log",
-                "a",
-                encoding="utf-8",
-            ) as _df:
-                _df.write(json.dumps(payload) + "\n")
-        # #endregion
 
         return loss.item(), td_loss.item(), mono_loss_val
 
