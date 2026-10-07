@@ -1,6 +1,6 @@
 # DSW-QMIX
 
-PyTorch code for **constrained multi-agent RL** on the **blocker game** and **vehicular network** benchmarks. The DSW setup uses recurrent agents with dual mixers (reward and cost), joint constrained action selection, and optional monotonicity regularisation (`learners/dsw_learner.py`). Unconstrained baselines **IQL**, **VDN**, and **QMIX** use flat team reward only.
+PyTorch code for **constrained multi-agent RL** on the **blocker game** and **vehicular network** benchmarks. The DSW setup uses recurrent agents with dual mixers (reward and cost), a state-dependent cost weight from an urgency head (`modules/urgency_head.py`), joint constrained action selection, and optional monotonicity regularisation (`learners/dsw_learner.py`). Unconstrained baselines **IQL**, **VDN**, and **QMIX** use flat team reward only.
 
 This repository extends the **CMIX** line of work (peak and average constraints); see Citation below.
 

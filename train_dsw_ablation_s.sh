@@ -1,5 +1,5 @@
 #!/bin/sh
-# DSW ablation dsw-qmix-s: constant λ = 0.5 (no cost_weight MLP)
+# DSW ablation dsw-qmix-s: constant λ = 1.0 (no urgency head)
 set -e
 cd "$(dirname "$0")"
 

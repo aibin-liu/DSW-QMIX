@@ -1,15 +1,16 @@
 import copy
+import os
 import itertools
 import math
 import numpy as np
 from typing import List, Optional
 
 import torch as th
-import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import Adam
 
 from modules.mixers.multi_qmix import MultiQMixer
+from modules.urgency_head import UrgencyHead
 
 
 class DSWLearner:
@@ -41,25 +42,21 @@ class DSWLearner:
         sw = getattr(args, "static_cost_weight", None)
         self._static_cost_weight: Optional[float] = float(sw) if sw is not None else None
         if self._static_cost_weight is not None:
-            self.cost_weight_net = None
-            self.target_cost_weight_net = None
-            cw_params = []
+            self.urgency_head = None
+            self.target_urgency_head = None
+            uh_params = []
         else:
-            cw_hid = int(getattr(args, "cost_weight_mlp_hidden", 64))
-            self.cost_weight_net = nn.Sequential(
-                nn.Linear(state_dim, cw_hid),
-                nn.ReLU(),
-                nn.Linear(cw_hid, 1),
-            ).to(self.device)
-            self.target_cost_weight_net = copy.deepcopy(self.cost_weight_net).to(self.device)
-            cw_params = list(self.cost_weight_net.parameters())
+            uh_hid = int(getattr(args, "urgency_head_hidden", 64))
+            self.urgency_head = UrgencyHead(state_dim, uh_hid).to(self.device)
+            self.target_urgency_head = copy.deepcopy(self.urgency_head).to(self.device)
+            uh_params = list(self.urgency_head.parameters())
 
         agent_params = []
         for agent in self.agents:
             agent_params.extend(list(agent.parameters()))
 
         mixer_params = list(self.mixer_rew.parameters()) + list(self.mixer_cost.parameters())
-        self.params = agent_params + mixer_params + cw_params
+        self.params = agent_params + mixer_params + uh_params
 
         base_lr = float(getattr(args, "lr", 5e-4))
         mixer_lr = float(getattr(args, "lr_mixer", base_lr * 0.5))
@@ -67,7 +64,7 @@ class DSWLearner:
 
         optim_groups = [
             {"params": agent_params, "lr": base_lr},
-            {"params": mixer_params + cw_params, "lr": mixer_lr, "weight_decay": wd}
+            {"params": mixer_params + uh_params, "lr": mixer_lr, "weight_decay": wd}
         ]
 
         self.optimiser = Adam(optim_groups, betas=(0.9, 0.999), eps=1e-8)
@@ -117,23 +114,18 @@ class DSWLearner:
         terminal_win = r0 > 1.5
         return done_mask * (~terminal_win).float()
 
-    @staticmethod
-    def _cost_w_from_logits(logits: th.Tensor) -> th.Tensor:
-        """Map unconstrained MLP output to strictly positive cost weights (softplus + floor)."""
-        return F.softplus(logits).clamp(min=1e-6)
-
     def _cost_w(self, global_state_flat: th.Tensor) -> th.Tensor:
         """(N, state_dim) -> (N, 1), values > 0."""
         if self._static_cost_weight is not None:
             N = global_state_flat.shape[0]
             return global_state_flat.new_full((N, 1), self._static_cost_weight)
-        return self._cost_w_from_logits(self.cost_weight_net(global_state_flat))
+        return self.urgency_head(global_state_flat)
 
     def _target_cost_w(self, global_state_flat: th.Tensor) -> th.Tensor:
         if self._static_cost_weight is not None:
             N = global_state_flat.shape[0]
             return global_state_flat.new_full((N, 1), self._static_cost_weight)
-        return self._cost_w_from_logits(self.target_cost_weight_net(global_state_flat))
+        return self.target_urgency_head(global_state_flat)
 
     def _lambda_mono_at(self, step: int) -> float:
         start = self.lambda_mono_start
@@ -557,14 +549,14 @@ class DSWLearner:
             self._polyak_update_(self.mixer_rew, self.target_mixer_rew, self.soft_target_tau)
             self._polyak_update_(self.mixer_cost, self.target_mixer_cost, self.soft_target_tau)
             if self._static_cost_weight is None:
-                self._polyak_update_(self.cost_weight_net, self.target_cost_weight_net, self.soft_target_tau)
+                self._polyak_update_(self.urgency_head, self.target_urgency_head, self.soft_target_tau)
         else:
             for online, target in zip(self.agents, self.target_agents):
                 target.load_state_dict(online.state_dict())
             self.target_mixer_rew.load_state_dict(self.mixer_rew.state_dict())
             self.target_mixer_cost.load_state_dict(self.mixer_cost.state_dict())
             if self._static_cost_weight is None:
-                self.target_cost_weight_net.load_state_dict(self.cost_weight_net.state_dict())
+                self.target_urgency_head.load_state_dict(self.urgency_head.state_dict())
 
     def cuda(self):
         for agent in self.agents:
@@ -576,8 +568,8 @@ class DSWLearner:
         self.mixer_cost.cuda()
         self.target_mixer_cost.cuda()
         if self._static_cost_weight is None:
-            self.cost_weight_net.cuda()
-            self.target_cost_weight_net.cuda()
+            self.urgency_head.cuda()
+            self.target_urgency_head.cuda()
 
     def save_models(self, path):
         for i, agent in enumerate(self.agents):
@@ -588,7 +580,7 @@ class DSWLearner:
             with open(f"{path}/static_cost_weight.txt", "w") as f:
                 f.write(str(self._static_cost_weight))
         else:
-            th.save(self.cost_weight_net.state_dict(), f"{path}/cost_weight_net.th")
+            th.save(self.urgency_head.state_dict(), f"{path}/urgency_head.th")
         th.save(self.optimiser.state_dict(), f"{path}/opt.th")
 
     def load_models(self, path):
@@ -602,7 +594,10 @@ class DSWLearner:
         self.target_mixer_cost.load_state_dict(self.mixer_cost.state_dict())
 
         if self._static_cost_weight is None:
-            self.cost_weight_net.load_state_dict(th.load(f"{path}/cost_weight_net.th", map_location=lambda storage, loc: storage))
-            self.target_cost_weight_net.load_state_dict(self.cost_weight_net.state_dict())
+            uh_path = f"{path}/urgency_head.th"
+            if not os.path.exists(uh_path):
+                uh_path = f"{path}/cost_weight_net.th"  # checkpoints saved before the rename
+            self.urgency_head.load_state_dict(th.load(uh_path, map_location=lambda storage, loc: storage))
+            self.target_urgency_head.load_state_dict(self.urgency_head.state_dict())
 
         self.optimiser.load_state_dict(th.load(f"{path}/opt.th", map_location=lambda storage, loc: storage))

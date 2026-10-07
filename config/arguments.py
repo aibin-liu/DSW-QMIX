@@ -60,8 +60,8 @@ def get_arg():
         help='Use discrete policy in constrained RL algorithm')
     parser.add_argument('--weight-alpha', type=float, default=0.1,
         help='Weighted QMIX alpha parameter')
-    parser.add_argument('--cost-weight-mlp-hidden', type=int, default=64,
-        help='Hidden size for state-dependent cost-weight MLP in DSW learner')
+    parser.add_argument('--urgency-head-hidden', '--cost-weight-mlp-hidden', dest='urgency_head_hidden', type=int, default=64,
+        help='Hidden size of the urgency head (state-dependent cost weight) in DSW learner')
     parser.add_argument('--policy-rho', type=float, default=0.1,
         help='DSW policy extraction: penalty weight rho on max(0,-Q_p)^2 in joint argmax objective')
     parser.add_argument('--double-q', action='store_true', default=False,
@@ -93,7 +93,7 @@ def get_arg():
         help='Blockergame only: potential shaping (0=off). F = gamma*Phi(s_next)-Phi(s); Phi = -scale * team min L1 dist to reachable bottom row.')
     # DSW ablations
     parser.add_argument('--static-cost-weight', type=float, default=None,
-        help='DSW: if set, use this constant λ instead of cost_weight_net (ablation dsw-qmix-s).')
+        help='DSW: if set, use this constant λ instead of the urgency head (ablation dsw-qmix-s).')
     parser.add_argument('--hard-mixer-mono', action='store_true', default=False,
         help='DSW MultiQMixer: enforce |w| on hypernet mixing weights (hard monotonicity).')
     parser.add_argument('--disable-soft-mono', action='store_true', default=False,
